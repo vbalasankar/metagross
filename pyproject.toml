@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metagross"
+version = "0.0.1"
+description = "A from-scratch CUDA implementation of a compressed, paged KV-cache for transformer inference."
+requires-python = ">=3.9"
+
+# torch is intentionally NOT listed as a build/runtime dependency here.
+# Reason: torch must already be installed (matching your CUDA driver)
+# before the extension builds, and letting pip's build isolation manage
+# torch itself tends to trigger a redundant reinstall in an isolated venv.
+# See README "Build & run" for the actual install order.

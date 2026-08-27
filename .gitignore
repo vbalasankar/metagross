@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ninja build cache (used by torch's BuildExtension)
+.ninja_deps
+.ninja_log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

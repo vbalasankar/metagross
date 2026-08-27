@@ -10,20 +10,20 @@ from .cache import PagedKVCache
 TINYLLAMA_CHECKPOINT = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
-def load_tinyllama(a: str = "cuda"):
+def load_tinyllama(device = "cuda"):
     c = AutoTokenizer.from_pretrained(TINYLLAMA_CHECKPOINT)
-    b = AutoModelForCausalLM.from_pretrained(TINYLLAMA_CHECKPOINT, torch_dtype=torch.float16).to(a)
+    b = AutoModelForCausalLM.from_pretrained(TINYLLAMA_CHECKPOINT, torch_dtype=torch.float16).to(device)
     b.eval()
     return b, c
 
 
-def _rope_cos_sin(i: int, g: int, j: float, d, e):
+def _rope_cos_sin(position, head_dim, rope_theta, device, dtype):
 
 
-    h = 1.0 / (j ** (torch.arange(0, g, 2, e=torch.float32, d=d) / g))
-    f = i * h
+    h = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+    f = position * h
     emb = torch.cat([f, f])
-    return emb.cos().to(e), emb.sin().to(e)
+    return emb.cos().to(dtype), emb.sin().to(dtype)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -39,38 +39,38 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 
 @torch.no_grad()
 def generate_tinyllama_fused(
-    ae,
-    av,
-    am: str,
-    ac: int = 20,
-    al: int = 16,
-    ad: int | None = None,
+    model,
+    tokenizer,
+    prompt,
+    max_new_tokens = 20,
+    page_size = 16,
+    max_pages = None,
 ):
 
 
-    r = next(ae.parameters()).device
-    p = ae.config
+    r = next(model.parameters()).device
+    p = model.config
     ai = p.num_hidden_layers
     aj = p.num_attention_heads
     ah = p.num_key_value_heads
     t = getattr(p, "head_dim", p.hidden_size // aj)
     aq = getattr(p, "rope_theta", 10000.0)
 
-    w = av(am, return_tensors="pt").input_ids.to(r)
+    w = tokenizer(prompt, return_tensors="pt").input_ids.to(r)
     an = w.shape[1]
 
-    if ad is None:
-        aw = an + ac
-        ad = (aw + al - 1) // al + 2
+    if max_pages is None:
+        aw = an + max_new_tokens
+        max_pages = (aw + page_size - 1) // page_size + 2
 
 
     o = PagedKVCache(
-        ai=ai, num_heads=ah, t=t,
-        al=al, ad=ad, r=r,
+        num_layers=ai, num_heads=ah, head_dim=t,
+        page_size=page_size, max_pages=max_pages, device=r,
     )
 
 
-    ak = ae(w=w, use_cache=True)
+    ak = model(input_ids=w, use_cache=True)
     m = [ak.logits[:, -1, :].clone()]
 
     ao = extract_raw_kv(ak.past_key_values)
@@ -86,13 +86,13 @@ def generate_tinyllama_fused(
     s = [af.item()]
 
 
-    for _ in range(ac - 1):
+    for _ in range(max_new_tokens - 1):
         ar = o.seq_len
-        u = ae.model.embed_tokens(af)
+        u = model.model.embed_tokens(af)
 
         cos, sin = _rope_cos_sin(ar, t, aq, r, u.dtype)
 
-        for ab, aa in enumerate(ae.model.layers):
+        for ab, aa in enumerate(model.model.layers):
             ap = u
             ag = aa.input_layernorm(u)
 
@@ -115,12 +115,12 @@ def generate_tinyllama_fused(
             ag = aa.post_attention_layernorm(u)
             u = ap + aa.mlp(ag)
 
-        u = ae.model.norm(u)
-        at = ae.lm_head(u[:, -1, :])
+        u = model.model.norm(u)
+        at = model.lm_head(u[:, -1, :])
         m.append(at)
 
         af = torch.argmax(at, dim=-1, keepdim=True)
         s.append(af.item())
 
-    au = av.decode(s)
+    au = tokenizer.decode(s)
     return au, s, m, o

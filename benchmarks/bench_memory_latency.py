@@ -8,14 +8,14 @@ from metagross.generate import generate_baseline_hf, generate_metagross, generat
 PAGE_SIZE = 16
 
 
-def bench_one(l, u, m: str, k: int):
-    d = l.config
-    q = len(u(m).input_ids) + k
+def bench_one(model, tokenizer, prompt, max_new_tokens):
+    d = model.config
+    q = len(tokenizer(prompt).input_ids) + max_new_tokens
     p = {"seq_len": q}
 
     for j, fn in [
-        ("metagross_naive", lambda: generate_metagross(l, u, m, k=k, page_size=PAGE_SIZE)),
-        ("metagross_fused", lambda: generate_metagross_fused(l, u, m, k=k, page_size=PAGE_SIZE)),
+        ("metagross_naive", lambda: generate_metagross(model, tokenizer, prompt, max_new_tokens=max_new_tokens, page_size=PAGE_SIZE)),
+        ("metagross_fused", lambda: generate_metagross_fused(model, tokenizer, prompt, max_new_tokens=max_new_tokens, page_size=PAGE_SIZE)),
     ]:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -32,7 +32,7 @@ def bench_one(l, u, m: str, k: int):
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    _, i, _ = generate_baseline_hf(l, u, m, k=k)
+    _, i, _ = generate_baseline_hf(model, tokenizer, prompt, max_new_tokens=max_new_tokens)
     torch.cuda.synchronize()
     p["baseline_latency_s"] = time.perf_counter() - t0
     p["baseline_peak_mb"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
@@ -47,34 +47,34 @@ def bench_one(l, u, m: str, k: int):
     return p
 
 
-def make_plots(y, w="benchmarks/results.png"):
+def make_plots(rows, out_path="benchmarks/results.png"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    z = [r["seq_len"] for r in y]
+    z = [r["seq_len"] for r in rows]
     fig, v = plt.subplots(1, 2, figsize=(11, 4.5))
 
     ax = v[0]
-    ax.plot(z, [r["baseline_latency_s"] * 1000 for r in y], marker="o", label="HF baseline (FP16)")
-    ax.plot(z, [r["metagross_naive_latency_s"] * 1000 for r in y], marker="o", label="Metagross (Phase 1, naive)")
-    ax.plot(z, [r["metagross_fused_latency_s"] * 1000 for r in y], marker="o", label="Metagross (Phase 2, fused)")
+    ax.plot(z, [r["baseline_latency_s"] * 1000 for r in rows], marker="o", label="HF baseline (FP16)")
+    ax.plot(z, [r["metagross_naive_latency_s"] * 1000 for r in rows], marker="o", label="Metagross (Phase 1, naive)")
+    ax.plot(z, [r["metagross_fused_latency_s"] * 1000 for r in rows], marker="o", label="Metagross (Phase 2, fused)")
     ax.set_xlabel("sequence length (tokens)")
     ax.set_ylabel("latency (ms)")
     ax.set_title("Generation latency")
     ax.legend()
 
     ax = v[1]
-    ax.plot(z, [r["baseline_cache_mb"] for r in y], marker="o", label="HF baseline (FP16 cache)")
-    ax.plot(z, [r["metagross_naive_cache_mb"] for r in y], marker="o", label="Metagross (INT8 cache)")
+    ax.plot(z, [r["baseline_cache_mb"] for r in rows], marker="o", label="HF baseline (FP16 cache)")
+    ax.plot(z, [r["metagross_naive_cache_mb"] for r in rows], marker="o", label="Metagross (INT8 cache)")
     ax.set_xlabel("sequence length (tokens)")
     ax.set_ylabel("cache memory (MB)")
     ax.set_title("KV-cache memory (Phase 1 and Phase 2 share the same storage format)")
     ax.legend()
 
     fig.tight_layout()
-    fig.savefig(w, dpi=150)
-    print(f"\nSaved plots to {w}")
+    fig.savefig(out_path, dpi=150)
+    print(f"\nSaved plots to {out_path}")
 
 
 def main():

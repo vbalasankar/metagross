@@ -15,134 +15,134 @@ def _get_C():
 class LayerKVCache:
 
 
-    def __init__(g, d: int, b: int, e: int, c: int, a: str):
+    def __init__(self, num_heads, head_dim, page_size, max_pages, device):
 
 
-        if d <= 0:
-            raise ValueError(f"num_heads must be positive, got {d}")
-        if b <= 0:
-            raise ValueError(f"head_dim must be positive, got {b}")
-        if e <= 0:
-            raise ValueError(f"page_size must be positive, got {e}")
-        if c <= 0:
-            raise ValueError(f"max_pages must be positive, got {c}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if head_dim <= 0:
+            raise ValueError(f"head_dim must be positive, got {head_dim}")
+        if page_size <= 0:
+            raise ValueError(f"page_size must be positive, got {page_size}")
+        if max_pages <= 0:
+            raise ValueError(f"max_pages must be positive, got {max_pages}")
 
-        g.num_heads = d
-        g.head_dim = b
-        g.page_size = e
-        g.max_pages = c
-        g.device = a
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.page_size = page_size
+        self.max_pages = max_pages
+        self.device = device
 
-        g.storage = torch.zeros(
-            c, e, d, b, dtype=torch.int8, a=a
+        self.storage = torch.zeros(
+            max_pages, page_size, num_heads, head_dim, dtype=torch.int8, device=device
         )
-        g.page_scales: list[float | None] = [None] * c
-        g.allocator = BlockAllocator(c)
-        g.block_table: list[int] = []
-        g.seq_len = 0
-        g._staging: list[torch.Tensor] = []
+        self.page_scales: list[float | None] = [None] * max_pages
+        self.allocator = BlockAllocator(max_pages)
+        self.block_table: list[int] = []
+        self.seq_len = 0
+        self._staging: list[torch.Tensor] = []
 
-    def append(j, h: torch.Tensor) -> None:
+    def append(self, new_values) -> None:
 
 
-        if h.dim() != 3:
+        if new_values.dim() != 3:
             raise ValueError(
-                f"new_values must be 3-D [num_new_tokens, num_heads, head_dim], got {h.dim()}-D"
+                f"new_values must be 3-D [num_new_tokens, num_heads, head_dim], got {new_values.dim()}-D"
             )
-        if h.shape[1] != j.num_heads:
-            raise ValueError(f"expected num_heads={j.num_heads}, got {h.shape[1]}")
-        if h.shape[2] != j.head_dim:
-            raise ValueError(f"expected head_dim={j.head_dim}, got {h.shape[2]}")
+        if new_values.shape[1] != self.num_heads:
+            raise ValueError(f"expected num_heads={self.num_heads}, got {new_values.shape[1]}")
+        if new_values.shape[2] != self.head_dim:
+            raise ValueError(f"expected head_dim={self.head_dim}, got {new_values.shape[2]}")
 
-        for i in range(h.shape[0]):
-            j._staging.append(h[i])
-            j.seq_len += 1
-            if len(j._staging) == j.page_size:
-                j._commit_staged_page()
+        for i in range(new_values.shape[0]):
+            self._staging.append(new_values[i])
+            self.seq_len += 1
+            if len(self._staging) == self.page_size:
+                self._commit_staged_page()
 
-    def _commit_staged_page(o) -> None:
-        m = o.allocator.allocate()
-        o.block_table.append(m)
+    def _commit_staged_page(self) -> None:
+        m = self.allocator.allocate()
+        self.block_table.append(m)
 
-        k = torch.stack(o._staging)
-        l = o.storage[m]
+        k = torch.stack(self._staging)
+        l = self.storage[m]
         n = _get_C().quantize_new_scale(k, l, 0)
-        o.page_scales[m] = n
+        self.page_scales[m] = n
 
-        o._staging = []
+        self._staging = []
 
-    def read_fp32(s) -> torch.Tensor:
+    def read_fp32(self) -> torch.Tensor:
 
         p = []
-        for q in s.block_table:
-            r = s.page_scales[q]
-            p.append(_get_C().dequantize_page(s.storage[q], 0, s.page_size, r))
-        if s._staging:
-            p.append(torch.stack(s._staging))
+        for q in self.block_table:
+            r = self.page_scales[q]
+            p.append(_get_C().dequantize_page(self.storage[q], 0, self.page_size, r))
+        if self._staging:
+            p.append(torch.stack(self._staging))
 
         if not p:
-            return torch.empty(0, s.num_heads, s.head_dim, dtype=torch.float32, device=s.device)
+            return torch.empty(0, self.num_heads, self.head_dim, dtype=torch.float32, device=self.device)
         return torch.cat(p, dim=0)
 
-    def memory_bytes(t) -> int:
+    def memory_bytes(self) -> int:
 
-        return t.storage.numel()
+        return self.storage.numel()
 
 
 class PagedKVCache:
 
 
     def __init__(
-        aa, y: int, x: int, v: int,
-        z: int = 16, w: int = 64, u: str = "cuda",
+        self, num_layers, num_heads, head_dim,
+        page_size = 16, max_pages = 64, device = "cuda",
     ):
 
 
-        if y <= 0:
-            raise ValueError(f"num_layers must be positive, got {y}")
-        aa.num_layers = y
-        aa.k_layers = [
-            LayerKVCache(x, v, z, w, u) for _ in range(y)
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        self.num_layers = num_layers
+        self.k_layers = [
+            LayerKVCache(num_heads, head_dim, page_size, max_pages, device) for _ in range(num_layers)
         ]
-        aa.v_layers = [
-            LayerKVCache(x, v, z, w, u) for _ in range(y)
+        self.v_layers = [
+            LayerKVCache(num_heads, head_dim, page_size, max_pages, device) for _ in range(num_layers)
         ]
 
-    def append(ag, ad: int, ae: torch.Tensor, af: torch.Tensor) -> None:
-        if not (0 <= ad < ag.num_layers):
-            raise ValueError(f"layer_idx={ad} out of range for num_layers={ag.num_layers}")
+    def append(self, layer_idx, new_k, new_v) -> None:
+        if not (0 <= layer_idx < self.num_layers):
+            raise ValueError(f"layer_idx={layer_idx} out of range for num_layers={self.num_layers}")
 
 
-        if ae.dim() != 3:
-            raise ValueError(f"new_k must be 3-D [num_new_tokens, num_heads, head_dim], got {ae.dim()}-D")
-        if af.dim() != 3:
-            raise ValueError(f"new_v must be 3-D [num_new_tokens, num_heads, head_dim], got {af.dim()}-D")
+        if new_k.dim() != 3:
+            raise ValueError(f"new_k must be 3-D [num_new_tokens, num_heads, head_dim], got {new_k.dim()}-D")
+        if new_v.dim() != 3:
+            raise ValueError(f"new_v must be 3-D [num_new_tokens, num_heads, head_dim], got {new_v.dim()}-D")
 
-        if ae.shape[0] != af.shape[0]:
+        if new_k.shape[0] != new_v.shape[0]:
             raise ValueError(
-                f"K and V must have the same number of tokens, got {ae.shape[0]} and {af.shape[0]}"
+                f"K and V must have the same number of tokens, got {new_k.shape[0]} and {new_v.shape[0]}"
             )
 
-        if ae.shape[1:] != af.shape[1:]:
-            raise ValueError(f"K and V shapes must match, got {tuple(ae.shape)} and {tuple(af.shape)}")
+        if new_k.shape[1:] != new_v.shape[1:]:
+            raise ValueError(f"K and V shapes must match, got {tuple(new_k.shape)} and {tuple(new_v.shape)}")
 
-        ac = ag.k_layers[ad].num_heads
-        ab = ag.k_layers[ad].head_dim
-        if ae.shape[1] != ac:
-            raise ValueError(f"expected num_heads={ac}, got {ae.shape[1]}")
-        if ae.shape[2] != ab:
-            raise ValueError(f"expected head_dim={ab}, got {ae.shape[2]}")
+        ac = self.k_layers[layer_idx].num_heads
+        ab = self.k_layers[layer_idx].head_dim
+        if new_k.shape[1] != ac:
+            raise ValueError(f"expected num_heads={ac}, got {new_k.shape[1]}")
+        if new_k.shape[2] != ab:
+            raise ValueError(f"expected head_dim={ab}, got {new_k.shape[2]}")
 
-        ag.k_layers[ad].append(ae)
-        ag.v_layers[ad].append(af)
+        self.k_layers[layer_idx].append(new_k)
+        self.v_layers[layer_idx].append(new_v)
 
-    def read_layer_fp32(ai, ah: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return ai.k_layers[ah].read_fp32(), ai.v_layers[ah].read_fp32()
+    def read_layer_fp32(self, layer_idx) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.k_layers[layer_idx].read_fp32(), self.v_layers[layer_idx].read_fp32()
 
     @property
-    def seq_len(aj) -> int:
-        return aj.k_layers[0].seq_len
+    def seq_len(self) -> int:
+        return self.k_layers[0].seq_len
 
-    def memory_bytes(al) -> int:
+    def memory_bytes(self) -> int:
 
-        return sum(ak.memory_bytes() for ak in al.k_layers + al.v_layers)
+        return sum(ak.memory_bytes() for ak in self.k_layers + self.v_layers)

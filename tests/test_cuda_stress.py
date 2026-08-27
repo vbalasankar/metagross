@@ -14,30 +14,30 @@ BASE_SEED = 20260822
 N_TRIALS = 25
 
 
-def _rng(b):
+def _rng(offset):
 
 
-    return torch.Generator().manual_seed(BASE_SEED + b)
+    return torch.Generator().manual_seed(BASE_SEED + offset)
 
 
-def _randn_cuda(g, *d, c=1.0):
-    return (torch.randn(*d, generator=g) * c).cuda()
+def _randn_cuda(g, *shape, scale=1.0):
+    return (torch.randn(*shape, generator=g) * scale).cuda()
 
 
-def _randint(g, low, e):
-    return int(torch.randint(low, e, (1,), generator=g).item())
+def _randint(g, low, high):
+    return int(torch.randint(low, high, (1,), generator=g).item())
 
 
-def _reference_full_attention(l, k, v, h):
+def _reference_full_attention(query, k, v, inv_sqrt_head_dim):
 
-    m = torch.einsum("thd,hd->ht", k, l) * h
+    m = torch.einsum("thd,hd->ht", k, query) * inv_sqrt_head_dim
     m = m - m.max(dim=-1, keepdim=True).values
     o = torch.softmax(m, dim=-1)
     return torch.einsum("ht,thd->hd", o, v)
 
 
 class TestRandomizedInt8:
-    def test_quantize_dequantize_roundtrip(aa):
+    def test_quantize_dequantize_roundtrip(self):
         for ab in range(N_TRIALS):
             g = _rng(ab)
             w = _randint(g, 1, 17)
@@ -45,7 +45,7 @@ class TestRandomizedInt8:
             q = _randint(g, 1, 33)
             r = torch.rand((1,), generator=g).item() * 10 + 0.01
 
-            ac = _randn_cuda(g, w, u, q, z=r)
+            ac = _randn_cuda(g, w, u, q, scale=r)
             x = torch.zeros(w, u, q, dtype=torch.int8, device="cuda")
             z = _C.quantize_new_scale(ac, x, 0)
             y = _C.dequantize_page(x, 0, w, z)
@@ -58,7 +58,7 @@ class TestRandomizedInt8:
 
 
 class TestRandomizedInt4:
-    def test_quantize_dequantize_roundtrip(al):
+    def test_quantize_dequantize_roundtrip(self):
         for am in range(N_TRIALS):
             g = _rng(1000 + am)
             ah = _randint(g, 1, 17)
@@ -66,7 +66,7 @@ class TestRandomizedInt4:
             ad = _randint(g, 1, 17) * 2
             ae = torch.rand((1,), generator=g).item() * 10 + 0.01
 
-            ao = _randn_cuda(g, ah, ag, ad, ak=ae)
+            ao = _randn_cuda(g, ah, ag, ad, scale=ae)
             ai = torch.zeros(ah, ag, ad // 2, dtype=torch.uint8, device="cuda")
             ak = _C.quantize_int4_new_scale(ao, ai, 0)
             aj = _C.dequantize_int4_page(ai, 0, ah, ak)
@@ -77,7 +77,7 @@ class TestRandomizedInt4:
 
 
 class TestRandomizedPageTransitions:
-    def test_random_seq_len_and_page_size(ax):
+    def test_random_seq_len_and_page_size(self):
         for az in range(N_TRIALS):
             g = _rng(2000 + az)
             av = _randint(g, 1, 33)
@@ -86,8 +86,8 @@ class TestRandomizedPageTransitions:
             aq = _randint(g, 1, 17)
             ar = ay // av + 2
 
-            ap = LayerKVCache(au=au, aq=aq, av=av,
-                                  ar=ar, device="cuda")
+            ap = LayerKVCache(num_heads=au, head_dim=aq, page_size=av,
+                                  max_pages=ar, device="cuda")
             ba = _randn_cuda(g, ay, au, aq, scale=3.0)
             ap.append(ba)
 
@@ -101,7 +101,7 @@ class TestRandomizedPageTransitions:
 
 
 class TestRandomizedAttentionShapes:
-    def test_random_shapes_match_reference(bo):
+    def test_random_shapes_match_reference(self):
         for bq in range(N_TRIALS):
             g = _rng(3000 + bq)
 
@@ -116,14 +116,14 @@ class TestRandomizedAttentionShapes:
                 continue
             bf = bg + 2
 
-            bb = PagedKVCache(num_layers=1, num_heads=bi, bc=bc,
-                                  bj=bj, bf=bf, device="cuda")
+            bb = PagedKVCache(num_layers=1, num_heads=bi, head_dim=bc,
+                                  page_size=bj, max_pages=bf, device="cuda")
             bd = _randn_cuda(g, bp, bi, bc, scale=3.0)
             br = _randn_cuda(g, bp, bi, bc, scale=3.0)
             bb.append(0, bd, br)
 
             bk = _randn_cuda(g, bi, bc)
-            got = paged_attention(bb, layer_idx=0, bk=bk)
+            got = paged_attention(bb, layer_idx=0, query=bk)
 
             bl, bm = bb.read_layer_fp32(0)
             bn = _reference_full_attention(bk, bl, bm, 1.0 / (bc ** 0.5))
@@ -137,7 +137,7 @@ class TestRandomizedAttentionShapes:
 
 
 class TestRandomizedGQA:
-    def test_random_valid_gqa_ratios_match_reference(cg):
+    def test_random_valid_gqa_ratios_match_reference(self):
         bt = 64
         ck = [1, 2, 4, 8]
         for ci in range(N_TRIALS):
@@ -148,14 +148,14 @@ class TestRandomizedGQA:
             bz = 16
             ch = _randint(g, 1, 3) * bz
 
-            bs = PagedKVCache(num_layers=1, num_heads=bw, bt=bt,
-                                  bz=bz, max_pages=ch // bz + 1, device="cuda")
+            bs = PagedKVCache(num_layers=1, num_heads=bw, head_dim=bt,
+                                  page_size=bz, max_pages=ch // bz + 1, device="cuda")
             bu = _randn_cuda(g, ch, bw, bt, scale=3.0)
             cj = _randn_cuda(g, ch, bw, bt, scale=3.0)
             bs.append(0, bu, cj)
 
             ca = _randn_cuda(g, bx, bt)
-            got = paged_attention(bs, layer_idx=0, ca=ca)
+            got = paged_attention(bs, layer_idx=0, query=ca)
 
             assert got.shape == (bx, bt), f"trial {ci}: output shape mismatch"
             assert torch.isfinite(got).all(), f"trial {ci}: non-finite output"
@@ -170,7 +170,7 @@ class TestRandomizedGQA:
                 f"max diff {(got - cd).abs().max().item()}"
             )
 
-    def test_random_invalid_gqa_ratios_rejected(cs):
+    def test_random_invalid_gqa_ratios_rejected(self):
         cn, cq, co = 64, 16, 4
         for ct in range(N_TRIALS):
             g = _rng(5000 + ct)
@@ -181,31 +181,31 @@ class TestRandomizedGQA:
                 cm += 1
             cp = cm
 
-            cl = PagedKVCache(num_layers=1, num_heads=co, cn=cn,
-                                  cq=cq, max_pages=2, device="cuda")
+            cl = PagedKVCache(num_layers=1, num_heads=co, head_dim=cn,
+                                  page_size=cq, max_pages=2, device="cuda")
             cl.append(0, _randn_cuda(g, cq, co, cn),
                          _randn_cuda(g, cq, co, cn))
             cr = _randn_cuda(g, cp, cn)
             with pytest.raises(ValueError):
-                paged_attention(cl, layer_idx=0, cr=cr)
+                paged_attention(cl, layer_idx=0, query=cr)
 
 
 class TestRandomizedStagingLengths:
-    def test_staging_only_matches_reference_at_random_lengths(dc):
+    def test_staging_only_matches_reference_at_random_lengths(self):
         cv, cy, cz = 64, 4, 16
         for dd in range(N_TRIALS):
             g = _rng(6000 + dd)
             cx = _randint(g, 1, cz)
 
-            cu = PagedKVCache(num_layers=1, cy=cy, cv=cv,
-                                  cz=cz, max_pages=2, device="cuda")
+            cu = PagedKVCache(num_layers=1, num_heads=cy, head_dim=cv,
+                                  page_size=cz, max_pages=2, device="cuda")
             cw = _randn_cuda(g, cx, cy, cv, scale=3.0)
             de = _randn_cuda(g, cx, cy, cv, scale=3.0)
             cu.append(0, cw, de)
             assert cu.k_layers[0].block_table == [], f"trial {dd}: expected nothing committed"
 
             da = _randn_cuda(g, cy, cv)
-            got = paged_attention(cu, layer_idx=0, da=da)
+            got = paged_attention(cu, layer_idx=0, query=da)
             db = _reference_full_attention(da, cw, de, 1.0 / (cv ** 0.5))
             assert torch.allclose(got, db, atol=1e-3, rtol=1e-3), (
                 f"trial {dd} (n_staged={cx}): max diff {(got - db).abs().max().item()}"
@@ -213,14 +213,14 @@ class TestRandomizedStagingLengths:
 
 
 class TestRandomizedBlockTables:
-    def test_shuffled_logical_order_matches_reference(ea):
+    def test_shuffled_logical_order_matches_reference(self):
 
 
         dj, dq, dr, dp = 64, 4, 16, 4
         for ec in range(N_TRIALS):
             g = _rng(7000 + ec)
-            dg = PagedKVCache(num_layers=1, dq=dq, dj=dj,
-                                  dr=dr, max_pages=dp, device="cuda")
+            dg = PagedKVCache(num_layers=1, num_heads=dq, head_dim=dj,
+                                  page_size=dr, max_pages=dp, device="cuda")
             for p in range(dp):
                 k = _randn_cuda(g, dr, dq, dj, scale=3.0)
                 v = _randn_cuda(g, dr, dq, dj, scale=3.0)
@@ -272,14 +272,14 @@ class TestRandomizedBlockTables:
                 f"would point at a real indexing bug. See printed diagnostics above."
             )
 
-    def test_shuffled_logical_order_exact_under_zero_quantization_error(fc):
+    def test_shuffled_logical_order_exact_under_zero_quantization_error(self):
 
 
         ej, eo, eq, en = 64, 4, 16, 4
         for fe in range(5):
             g = _rng(7100 + fe)
-            ei = PagedKVCache(num_layers=1, eo=eo, ej=ej,
-                                  eq=eq, max_pages=en, device="cuda")
+            ei = PagedKVCache(num_layers=1, num_heads=eo, head_dim=ej,
+                                  page_size=eq, max_pages=en, device="cuda")
             ep = []
             er = []
             for p in range(en):

@@ -10,13 +10,13 @@ from tests.reference import dequantize_symmetric_int4_packed, quantize_symmetric
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-capable GPU")
 
 
-def _random_tokens(d, c=4, b=8, e=3.0, f=0):
-    g = torch.Generator(device="cuda").manual_seed(f)
-    return torch.randn(d, c, b, device="cuda", generator=g) * e
+def _random_tokens(num_tokens, num_heads=4, head_dim=8, scale=3.0, seed=0):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    return torch.randn(num_tokens, num_heads, head_dim, device="cuda", generator=g) * scale
 
 
 class TestInt4KernelAgainstReference:
-    def test_quantize_matches_reference(m):
+    def test_quantize_matches_reference(self):
         n = _random_tokens(num_tokens=16, num_heads=4, head_dim=8)
         j = torch.zeros(16, 4, 4, dtype=torch.uint8, device="cuda")
 
@@ -31,7 +31,7 @@ class TestInt4KernelAgainstReference:
             msg="packed INT4 bytes differ from the reference",
         )
 
-    def test_dequantize_recovers_within_half_step(s):
+    def test_dequantize_recovers_within_half_step(self):
         t = _random_tokens(num_tokens=16, num_heads=4, head_dim=8)
         p = torch.zeros(16, 4, 4, dtype=torch.uint8, device="cuda")
         r = _C.quantize_int4_new_scale(t, p, 0)
@@ -41,7 +41,7 @@ class TestInt4KernelAgainstReference:
         o = (t - q).abs().max().item()
         assert o <= r / 2 + 1e-3
 
-    def test_roundtrip_matches_reference_exactly(ab):
+    def test_roundtrip_matches_reference_exactly(self):
 
         ac = _random_tokens(num_tokens=8, num_heads=2, head_dim=8, seed=3)
         w = torch.zeros(8, 2, 4, dtype=torch.uint8, device="cuda")
@@ -55,7 +55,7 @@ class TestInt4KernelAgainstReference:
 
         torch.testing.assert_close(v.cpu(), torch.from_numpy(y), atol=1e-4, rtol=1e-4)
 
-    def test_storage_is_half_the_bytes_of_int8_for_the_same_shape(ai):
+    def test_storage_is_half_the_bytes_of_int8_for_the_same_shape(self):
 
         ah, ag, ad = 16, 4, 8
         af = torch.zeros(ah, ag, ad, dtype=torch.int8, device="cuda").numel()
@@ -63,7 +63,7 @@ class TestInt4KernelAgainstReference:
         assert ae == af // 2
 
 
-    def test_offset_write_does_not_disturb_earlier_tokens(an):
+    def test_offset_write_does_not_disturb_earlier_tokens(self):
         al = torch.zeros(16, 4, 4, dtype=torch.uint8, device="cuda")
         ak = _random_tokens(8, seed=4)
         _C.quantize_int4_new_scale(ak, al, 0)

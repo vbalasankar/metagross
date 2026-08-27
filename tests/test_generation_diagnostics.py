@@ -30,16 +30,16 @@ def gpt2():
 
 
 @torch.no_grad()
-def _true_step2_reference(j, t, m, g):
+def _true_step2_reference(model, tokenizer, prompt, device):
 
 
-    o = t(m, return_tensors="pt").input_ids.to(g)
-    p = j(input_ids=o, use_cache=True)
+    o = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    p = model(input_ids=o, use_cache=True)
     l = torch.argmax(p.logits[:, -1, :], dim=-1, keepdim=True)
     i = torch.cat([o, l], dim=1)
 
-    d = j(input_ids=i, use_cache=True)
-    x = j(input_ids=i, use_cache=False)
+    d = model(input_ids=i, use_cache=True)
+    x = model(input_ids=i, use_cache=False)
     c = (d.logits[:, -1, :] - x.logits[:, -1, :]).abs().max().item()
 
     u = x.logits[:, -1, :]
@@ -47,16 +47,16 @@ def _true_step2_reference(j, t, m, g):
     return u, w, c
 
 
-def _kv_error_vs_true(af, aj, ag):
+def _kv_error_vs_true(metagross_cache, true_raw_kv, num_layers):
 
 
     ah = []
     ab, am = [], []
-    for ae in range(ag):
-        ac, an = af.read_layer_fp32(ae)
+    for ae in range(num_layers):
+        ac, an = metagross_cache.read_layer_fp32(ae)
         ad = ac.transpose(0, 1).unsqueeze(0).float()
         ao = an.transpose(0, 1).unsqueeze(0).float()
-        ai, ak = aj[ae]
+        ai, ak = true_raw_kv[ae]
         aa = (ad - ai.float()).abs()
         al = (ao - ak.float()).abs()
         ah.append((ae, aa.max().item(), aa.mean().item(), al.max().item(), al.mean().item()))
@@ -67,20 +67,20 @@ def _kv_error_vs_true(af, aj, ag):
     return ah, y.max().item(), y.mean().item(), z.max().item(), z.mean().item()
 
 
-def _print_kv_error_table(av, ax, agg):
+def _print_kv_error_table(label, rows, agg):
     ap, aq, ay, az = agg
-    print(f"\n  {av} K/V error vs TRUE (unquantized) K/V, per layer:")
+    print(f"\n  {label} K/V error vs TRUE (unquantized) K/V, per layer:")
     print(f"  {'layer':>5}  {'K max':>10}  {'K mean':>10}  {'V max':>10}  {'V mean':>10}")
-    for aw, ar, au, ba, bb in ax:
+    for aw, ar, au, ba, bb in rows:
         print(f"  {aw:>5}  {ar:>10.5f}  {au:>10.5f}  {ba:>10.5f}  {bb:>10.5f}")
-    print(f"  AGGREGATE (all {len(ax)} layers): K max={ap:.5f} mean={aq:.5f} | V max={ay:.5f} mean={az:.5f}")
+    print(f"  AGGREGATE (all {len(rows)} layers): K max={ap:.5f} mean={aq:.5f} | V max={ay:.5f} mean={az:.5f}")
 
 
-def _print_attn_error_table(bc, bg, bh):
-    print(f"\n  {bc} per-layer attention-OUTPUT error:")
+def _print_attn_error_table(label, per_layer_attn_a, per_layer_attn_b):
+    print(f"\n  {label} per-layer attention-OUTPUT error:")
     print(f"  {'layer':>5}  {'max':>10}  {'mean':>10}")
     be, bf = [], []
-    for bd, (a, b) in enumerate(zip(bg, bh)):
+    for bd, (a, b) in enumerate(zip(per_layer_attn_a, per_layer_attn_b)):
         err = (a.float() - b.float()).abs()
         be.append(err.max().item())
         bf.append(err.mean().item())
@@ -90,24 +90,24 @@ def _print_attn_error_table(bc, bg, bh):
 
 
 @torch.no_grad()
-def _generate_gpt2_reference_attention(bz, cq, ch, bw, cf, bx=None):
+def _generate_gpt2_reference_attention(model, tokenizer, prompt, max_new_tokens, page_size, max_pages=None):
 
 
-    bo = next(bz.parameters()).device
-    bn = bz.config
+    bo = next(model.parameters()).device
+    bn = model.config
     cd = bn.n_layer
     cc = bn.n_head
     bq = bn.n_embd // bn.n_head
 
-    bs = cq(ch, return_tensors="pt").input_ids.to(bo)
+    bs = tokenizer(prompt, return_tensors="pt").input_ids.to(bo)
     ci = bs.shape[1]
-    if bx is None:
-        bx = (ci + bw + cf - 1) // cf + 2
+    if max_pages is None:
+        max_pages = (ci + max_new_tokens + page_size - 1) // page_size + 2
 
-    bm = PagedKVCache(cd=cd, cc=cc, bq=bq,
-                          cf=cf, bx=bx, bo=bo)
+    bm = PagedKVCache(num_layers=cd, num_heads=cc, head_dim=bq,
+                          page_size=page_size, max_pages=max_pages, device=bo)
 
-    ce = bz(bs=bs, use_cache=True)
+    ce = model(input_ids=bs, use_cache=True)
     bi = [ce.logits[:, -1, :].clone()]
     cj = extract_raw_kv(ce.past_key_values)
     for bv, (k, v) in enumerate(cj):
@@ -120,13 +120,13 @@ def _generate_gpt2_reference_attention(bz, cq, ch, bw, cf, bx=None):
     bp = [ca.item()]
     bk = []
 
-    for _ in range(bw - 1):
+    for _ in range(max_new_tokens - 1):
         cn = bm.seq_len
-        cg = torch.tensor([[cn]], dtype=torch.long, bo=bo)
-        br = bz.transformer.wte(ca) + bz.transformer.wpe(cg)
+        cg = torch.tensor([[cn]], dtype=torch.long, device=bo)
+        br = model.transformer.wte(ca) + model.transformer.wpe(cg)
 
         bk = []
-        for bv, bl in enumerate(bz.transformer.h):
+        for bv, bl in enumerate(model.transformer.h):
             ck = br
             cb = bl.ln_1(br)
 
@@ -158,36 +158,36 @@ def _generate_gpt2_reference_attention(bz, cq, ch, bw, cf, bx=None):
             cb = bl.ln_2(br)
             br = ck + bl.mlp(cb)
 
-        br = bz.transformer.ln_f(br)
-        co = bz.lm_head(br[:, -1, :])
+        br = model.transformer.ln_f(br)
+        co = model.lm_head(br[:, -1, :])
         bi.append(co)
 
         ca = torch.argmax(co, dim=-1, keepdim=True)
         bp.append(ca.item())
 
-    cp = cq.decode(bp)
+    cp = tokenizer.decode(bp)
     return cp, bp, bi, bm, bk
 
 
 @torch.no_grad()
-def _generate_gpt2_fused_instrumented(dk, dz, ds, di, dq, dj=None):
+def _generate_gpt2_fused_instrumented(model, tokenizer, prompt, max_new_tokens, page_size, max_pages=None):
 
 
-    db = next(dk.parameters()).device
-    da = dk.config
+    db = next(model.parameters()).device
+    da = model.config
     do = da.n_layer
     dn = da.n_head
     dd = da.n_embd // da.n_head
 
-    df = dz(ds, return_tensors="pt").input_ids.to(db)
+    df = tokenizer(prompt, return_tensors="pt").input_ids.to(db)
     dt = df.shape[1]
-    if dj is None:
-        dj = (dt + di + dq - 1) // dq + 2
+    if max_pages is None:
+        max_pages = (dt + max_new_tokens + page_size - 1) // page_size + 2
 
-    cz = PagedKVCache(do=do, dn=dn, dd=dd,
-                          dq=dq, dj=dj, db=db)
+    cz = PagedKVCache(num_layers=do, num_heads=dn, head_dim=dd,
+                          page_size=page_size, max_pages=max_pages, device=db)
 
-    dp = dk(df=df, use_cache=True)
+    dp = model(input_ids=df, use_cache=True)
     cv = [dp.logits[:, -1, :].clone()]
     du = extract_raw_kv(dp.past_key_values)
     for dh, (k, v) in enumerate(du):
@@ -200,13 +200,13 @@ def _generate_gpt2_fused_instrumented(dk, dz, ds, di, dq, dj=None):
     dc = [dl.item()]
     cx = []
 
-    for _ in range(di - 1):
+    for _ in range(max_new_tokens - 1):
         dw = cz.seq_len
-        dr = torch.tensor([[dw]], dtype=torch.long, db=db)
-        de = dk.transformer.wte(dl) + dk.transformer.wpe(dr)
+        dr = torch.tensor([[dw]], dtype=torch.long, device=db)
+        de = model.transformer.wte(dl) + model.transformer.wpe(dr)
 
         cx = []
-        for dh, cy in enumerate(dk.transformer.h):
+        for dh, cy in enumerate(model.transformer.h):
             dv = de
             dm = cy.ln_1(de)
 
@@ -230,42 +230,42 @@ def _generate_gpt2_fused_instrumented(dk, dz, ds, di, dq, dj=None):
             dm = cy.ln_2(de)
             de = dv + cy.mlp(dm)
 
-        de = dk.transformer.ln_f(de)
-        dx = dk.lm_head(de[:, -1, :])
+        de = model.transformer.ln_f(de)
+        dx = model.lm_head(de[:, -1, :])
         cv.append(dx)
 
         dl = torch.argmax(dx, dim=-1, keepdim=True)
         dc.append(dl.item())
 
-    dy = dz.decode(dc)
+    dy = tokenizer.decode(dc)
     return dy, dc, cv, cz, cx
 
 
 @pytest.mark.parametrize("prompt", PROMPTS)
-def test_three_stage_diagnostic(ff, fk):
-    fi, fn = ff
+def test_three_stage_diagnostic(gpt2, prompt):
+    fi, fn = gpt2
     fa = next(fi.parameters()).device
     fj = fi.config.n_layer
 
-    fo, fp, ez = _true_step2_reference(fi, fn, fk, fa)
+    fo, fp, ez = _true_step2_reference(fi, fn, prompt, fa)
 
     _, _, fh, fg = generate_metagross(
-        fi, fn, fk, max_new_tokens=2, page_size=TEST_PAGE_SIZE
+        fi, fn, prompt, max_new_tokens=2, page_size=TEST_PAGE_SIZE
     )
     ei = fh[1]
 
     _, _, fe, fb = generate_metagross_fused(
-        fi, fn, fk, max_new_tokens=2, page_size=TEST_PAGE_SIZE
+        fi, fn, prompt, max_new_tokens=2, page_size=TEST_PAGE_SIZE
     )
     et = fe[1]
 
     _, _, fm, fl, en = _generate_gpt2_reference_attention(
-        fi, fn, fk, max_new_tokens=2, page_size=TEST_PAGE_SIZE
+        fi, fn, prompt, max_new_tokens=2, page_size=TEST_PAGE_SIZE
     )
     eo = fm[1]
 
     _, _, fd, fc, ev = _generate_gpt2_fused_instrumented(
-        fi, fn, fk, max_new_tokens=2, page_size=TEST_PAGE_SIZE
+        fi, fn, prompt, max_new_tokens=2, page_size=TEST_PAGE_SIZE
     )
     ew = fd[1]
 
@@ -284,7 +284,7 @@ def test_three_stage_diagnostic(ff, fk):
     eq = (eo - ew).abs().max().item()
     er = (eo - ew).abs().mean().item()
 
-    print(f"\n{'=' * 78}\n[{fk!r}]\n{'=' * 78}")
+    print(f"\n{'=' * 78}\n[{prompt!r}]\n{'=' * 78}")
     print(f"use_cache=True vs False consistency check (expect ~FP16 noise only): {ez:.5f}")
     _print_kv_error_table("Phase 1 (generate_metagross)", ej, eh)
     _print_kv_error_table("Phase 2 (generate_metagross_fused)", eu, es)
@@ -299,22 +299,22 @@ def test_three_stage_diagnostic(ff, fk):
     print(f"  B vs C      (Phase 1 vs Phase 2, informational only):                    max={ek:.5f} mean={el:.5f}")
     print(f"  B' vs C'    (isolated ref-attn vs kernel -- KERNEL CORRECTNESS, gated):  max={eq:.5f} mean={er:.5f}")
 
-    assert torch.isfinite(fo).all(), f"[{fk!r}] NaN/Inf in true_logits -- baseline itself broken, unrelated to Metagross"
-    assert torch.isfinite(ei).all(), f"[{fk!r}] NaN/Inf in Phase 1 logits -- a real bug, not quantization noise"
-    assert torch.isfinite(et).all(), f"[{fk!r}] NaN/Inf in Phase 2 logits -- a real bug, not quantization noise"
-    assert torch.isfinite(eo).all(), f"[{fk!r}] NaN/Inf in isolated reference-attention logits"
-    assert torch.isfinite(ew).all(), f"[{fk!r}] NaN/Inf in instrumented-kernel logits"
+    assert torch.isfinite(fo).all(), f"[{prompt!r}] NaN/Inf in true_logits -- baseline itself broken, unrelated to Metagross"
+    assert torch.isfinite(ei).all(), f"[{prompt!r}] NaN/Inf in Phase 1 logits -- a real bug, not quantization noise"
+    assert torch.isfinite(et).all(), f"[{prompt!r}] NaN/Inf in Phase 2 logits -- a real bug, not quantization noise"
+    assert torch.isfinite(eo).all(), f"[{prompt!r}] NaN/Inf in isolated reference-attention logits"
+    assert torch.isfinite(ew).all(), f"[{prompt!r}] NaN/Inf in instrumented-kernel logits"
 
 
     assert ex < BPRIME_VS_CPRIME_MAX_ATTN_DIFF, (
-        f"[{fk!r}] isolated reference attention (B') and the fused CUDA kernel (C') produce different "
+        f"[{prompt!r}] isolated reference attention (B') and the fused CUDA kernel (C') produce different "
         f"per-layer attention OUTPUTS (max diff {ex:.4f}) even though both read the IDENTICAL "
         f"dequantized cache contents at each layer -- see the per-layer table printed above for exactly "
         f"which layer first diverges; that layer's metagross.attention.paged_attention call (and, by "
         f"extension, csrc/paged_attention.cu) is where to look, not quantization."
     )
     assert eq < BPRIME_VS_CPRIME_MAX_LOGIT_DIFF, (
-        f"[{fk!r}] isolated reference attention (B') and the fused CUDA kernel (C') diverge by "
+        f"[{prompt!r}] isolated reference attention (B') and the fused CUDA kernel (C') diverge by "
         f"{eq:.4f} in final logits even though both ran the IDENTICAL manual "
         f"per-layer loop over the IDENTICAL dequantized cache contents -- see the attention-output table "
         f"above to find which layer's output first diverges before this compounded into the final logits."

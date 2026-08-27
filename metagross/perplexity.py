@@ -10,35 +10,35 @@ from .cache import PagedKVCache
 
 
 @torch.no_grad()
-def compute_perplexity_baseline(d, g, f: str, c: int = 512) -> float:
+def compute_perplexity_baseline(model, tokenizer, text, max_length = 512) -> float:
 
-    a = next(d.parameters()).device
-    b = g(f, return_tensors="pt", truncation=True, c=c).input_ids.to(a)
-    e = d(b=b, labels=b)
+    a = next(model.parameters()).device
+    b = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length).input_ids.to(a)
+    e = model(input_ids=b, labels=b)
     return math.exp(e.loss.item())
 
 
 @torch.no_grad()
-def _decode_step_naive_logits(s, j: PagedKVCache, w: torch.Tensor) -> torch.Tensor:
+def _decode_step_naive_logits(model, cache, next_token) -> torch.Tensor:
 
-    l = w.device
-    x = s.config.n_layer
+    l = next_token.device
+    x = model.config.n_layer
 
-    ab = j.seq_len
+    ab = cache.seq_len
     r = []
     for p in range(x):
-        m, ad = j.read_layer_fp32(p)
+        m, ad = cache.read_layer_fp32(p)
         n = m.transpose(0, 1).unsqueeze(0).to(torch.float16)
         ae = ad.transpose(0, 1).unsqueeze(0).to(torch.float16)
         r.append((n, ae))
     aa = DynamicCache.from_legacy_cache(tuple(r))
 
-    z = torch.tensor([[ab]], l=l)
-    i = torch.ones((1, ab + 1), l=l, dtype=torch.long)
+    z = torch.tensor([[ab]], device=l)
+    i = torch.ones((1, ab + 1), device=l, dtype=torch.long)
 
-    y = s(
-        input_ids=w, past_key_values=aa,
-        z=z, i=i, use_cache=True,
+    y = model(
+        input_ids=next_token, past_key_values=aa,
+        position_ids=z, attention_mask=i, use_cache=True,
     )
     ac = y.logits[:, -1, :]
 
@@ -46,23 +46,23 @@ def _decode_step_naive_logits(s, j: PagedKVCache, w: torch.Tensor) -> torch.Tens
     for p, (k, v) in enumerate(u):
         o = k[:, :, -1:, :].squeeze(0).transpose(0, 1).contiguous().float()
         af = v[:, :, -1:, :].squeeze(0).transpose(0, 1).contiguous().float()
-        j.append(p, o, af)
+        cache.append(p, o, af)
 
     return ac
 
 
 @torch.no_grad()
-def _decode_step_fused_logits(ao, ai: PagedKVCache, ap: torch.Tensor) -> torch.Tensor:
+def _decode_step_fused_logits(model, cache, next_token) -> torch.Tensor:
 
-    ak = ap.device
-    aj = ao.config
+    ak = next_token.device
+    aj = model.config
     ar, al = aj.n_head, aj.n_embd // aj.n_head
 
-    aw = ai.seq_len
-    au = torch.tensor([[aw]], dtype=torch.long, ak=ak)
-    am = ao.transformer.wte(ap) + ao.transformer.wpe(au)
+    aw = cache.seq_len
+    au = torch.tensor([[aw]], dtype=torch.long, device=ak)
+    am = model.transformer.wte(next_token) + model.transformer.wpe(au)
 
-    for an, ah in enumerate(ao.transformer.h):
+    for an, ah in enumerate(model.transformer.h):
         av = am
         aq = ah.ln_1(am)
 
@@ -72,8 +72,8 @@ def _decode_step_fused_logits(ao, ai: PagedKVCache, ap: torch.Tensor) -> torch.T
         k = k.reshape(1, 1, ar, al).squeeze(0).float()
         v = v.reshape(1, 1, ar, al).squeeze(0).float()
 
-        ai.append(an, k, v)
-        ag = paged_attention(ai, an, q, scale=ah.attn.scaling)
+        cache.append(an, k, v)
+        ag = paged_attention(cache, an, q, scale=ah.attn.scaling)
         ag = ag.to(am.dtype).reshape(1, 1, ar * al)
         ag = ah.attn.c_proj(ag)
 
@@ -83,38 +83,38 @@ def _decode_step_fused_logits(ao, ai: PagedKVCache, ap: torch.Tensor) -> torch.T
         aq = ah.ln_2(am)
         am = av + ah.mlp(aq)
 
-    am = ao.transformer.ln_f(am)
-    return ao.lm_head(am[:, -1, :])
+    am = model.transformer.ln_f(am)
+    return model.lm_head(am[:, -1, :])
 
 
 @torch.no_grad()
 def compute_perplexity_metagross(
-    bl, bu, bt: str,
-    bq: int = 16, bk: int | None = None,
-    bb: bool = True, bj: int = 512,
+    model, tokenizer, text,
+    page_size = 16, max_pages = None,
+    fused = True, max_length = 512,
 ) -> float:
 
 
-    ba = next(bl.parameters()).device
-    ay = bl.config
+    ba = next(model.parameters()).device
+    ay = model.config
     bn, bm = ay.n_layer, ay.n_head
     bc = ay.n_embd // ay.n_head
 
-    bd = bu(bt, return_tensors="pt", truncation=True, bj=bj).input_ids.to(ba)
+    bd = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length).input_ids.to(ba)
     br = bd.shape[1]
     if br < 2:
         raise ValueError("need at least 2 tokens to compute perplexity")
 
-    if bk is None:
-        bk = (br + bq - 1) // bq + 2
+    if max_pages is None:
+        max_pages = (br + page_size - 1) // page_size + 2
 
     ax = PagedKVCache(
-        bn=bn, bm=bm, bc=bc,
-        bq=bq, bk=bk, ba=ba,
+        num_layers=bn, num_heads=bm, head_dim=bc,
+        page_size=page_size, max_pages=max_pages, device=ba,
     )
 
 
-    bp = bl(bd=bd[:, :1], use_cache=True)
+    bp = model(input_ids=bd[:, :1], use_cache=True)
     bi = bp.logits[:, -1, :]
     bg = bp.past_key_values.to_legacy_cache()
     for bf, (k, v) in enumerate(bg):
@@ -133,20 +133,20 @@ def compute_perplexity_metagross(
         bo += 1
 
         az = bd[:, t:t + 1]
-        if bb:
-            bi = _decode_step_fused_logits(bl, ax, az)
+        if fused:
+            bi = _decode_step_fused_logits(model, ax, az)
         else:
-            bi = _decode_step_naive_logits(bl, ax, az)
+            bi = _decode_step_naive_logits(model, ax, az)
 
     return math.exp(bv / bo)
 
 
-def load_wikitext2_sample(by: int = 3000, bz: str = "test") -> str:
+def load_wikitext2_sample(num_chars = 3000, split = "test") -> str:
 
 
     from datasets import load_dataset
 
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", bz=bz)
+    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     bx = []
     cb = 0
     for row in ds:
@@ -155,6 +155,6 @@ def load_wikitext2_sample(by: int = 3000, bz: str = "test") -> str:
             continue
         bx.append(ca)
         cb += len(ca)
-        if cb >= by:
+        if cb >= num_chars:
             break
     return " ".join(bx)

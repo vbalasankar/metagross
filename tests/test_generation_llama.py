@@ -23,28 +23,28 @@ def tinyllama():
 
 
 @pytest.mark.parametrize("prompt", PROMPTS)
-def test_first_step_logits_close_to_baseline(h, g):
-    e, i = h
+def test_first_step_logits_close_to_baseline(tinyllama, prompt):
+    e, i = tinyllama
     _, _, c, _ = generate_tinyllama_fused(
-        e, i, g, max_new_tokens=1, page_size=TEST_PAGE_SIZE
+        e, i, prompt, max_new_tokens=1, page_size=TEST_PAGE_SIZE
     )
-    _, _, d = generate_baseline_hf(e, i, g, max_new_tokens=1)
+    _, _, d = generate_baseline_hf(e, i, prompt, max_new_tokens=1)
 
 
     torch.testing.assert_close(c[0], d, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("prompt", PROMPTS)
-def test_generation_close_to_baseline(u, t):
-    s, v = u
+def test_generation_close_to_baseline(tinyllama, prompt):
+    s, v = tinyllama
     q = 12
     m, o, _, l = generate_tinyllama_fused(
-        s, v, t, max_new_tokens=q, page_size=TEST_PAGE_SIZE
+        s, v, prompt, max_new_tokens=q, page_size=TEST_PAGE_SIZE
     )
-    j, k, _ = generate_baseline_hf(s, v, t, max_new_tokens=q)
+    j, k, _ = generate_baseline_hf(s, v, prompt, max_new_tokens=q)
 
     p = sum(a == b for a, b in zip(o, k))
-    print(f"\n[{t!r}] TinyLlama fused vs baseline token match: {p}/{q}"
+    print(f"\n[{prompt!r}] TinyLlama fused vs baseline token match: {p}/{q}"
           f"\n  fused:    {m!r}\n  baseline: {j!r}")
 
 
@@ -52,8 +52,8 @@ def test_generation_close_to_baseline(u, t):
     assert p >= 1, "zero token matches suggests a real bug, not just quantization noise"
 
 
-def test_output_is_not_degenerate(y):
-    x, z = y
+def test_output_is_not_degenerate(tinyllama):
+    x, z = tinyllama
     _, w, _, _ = generate_tinyllama_fused(
         x, z, PROMPTS[0], max_new_tokens=5, page_size=TEST_PAGE_SIZE
     )

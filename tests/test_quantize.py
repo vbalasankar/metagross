@@ -11,15 +11,15 @@ from tests.reference import quantize_symmetric_int8, dequantize_symmetric_int8
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-capable GPU")
 
 
-def _random_tokens(d, c=4, b=8, e=3.0, f=0):
-    g = torch.Generator(device="cuda").manual_seed(f)
-    return (torch.randn(d, c, b, device="cuda", generator=g) * e)
+def _random_tokens(num_tokens, num_heads=4, head_dim=8, scale=3.0, seed=0):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    return (torch.randn(num_tokens, num_heads, head_dim, device="cuda", generator=g) * scale)
 
 
 class TestQuantizeKernelAgainstReference:
 
 
-    def test_quantize_new_scale_matches_reference(m):
+    def test_quantize_new_scale_matches_reference(self):
         n = _random_tokens(num_tokens=16, num_heads=4, head_dim=8)
         j = torch.zeros(16, 4, 8, dtype=torch.int8, device="cuda")
 
@@ -31,7 +31,7 @@ class TestQuantizeKernelAgainstReference:
             j.cpu(), torch.from_numpy(k), msg="quantized INT8 values differ from the reference"
         )
 
-    def test_dequantize_recovers_within_half_step(s):
+    def test_dequantize_recovers_within_half_step(self):
         t = _random_tokens(num_tokens=16, num_heads=4, head_dim=8)
         p = torch.zeros(16, 4, 8, dtype=torch.int8, device="cuda")
         r = _C.quantize_new_scale(t, p, 0)
@@ -42,7 +42,7 @@ class TestQuantizeKernelAgainstReference:
         o = (t - q).abs().max().item()
         assert o <= r / 2 + 1e-4
 
-    def test_fixed_scale_path_matches_reference_dequant(z):
+    def test_fixed_scale_path_matches_reference_dequant(self):
         aa = _random_tokens(num_tokens=8, num_heads=4, head_dim=8, seed=1)
         w = torch.zeros(16, 4, 8, dtype=torch.int8, device="cuda")
         u = 0.05
@@ -54,7 +54,7 @@ class TestQuantizeKernelAgainstReference:
         x = dequantize_symmetric_int8(y.numpy(), u)
         torch.testing.assert_close(v.cpu(), torch.from_numpy(x))
 
-    def test_fixed_scale_clamps_out_of_range_values(ac):
+    def test_fixed_scale_clamps_out_of_range_values(self):
 
 
         ad = torch.full((1, 4, 8), 1000.0, device="cuda")
@@ -63,7 +63,7 @@ class TestQuantizeKernelAgainstReference:
         assert (ab[0].cpu() == 127).all()
         assert (ab[1:].cpu() == 0).all()
 
-    def test_offset_write_does_not_disturb_earlier_tokens(aj):
+    def test_offset_write_does_not_disturb_earlier_tokens(self):
 
 
         ag = torch.zeros(16, 4, 8, dtype=torch.int8, device="cuda")
@@ -81,14 +81,14 @@ class TestQuantizeKernelAgainstReference:
 class TestLayerKVCache:
 
 
-    def test_fewer_than_page_size_tokens_stay_in_staging_uncommitted(al):
+    def test_fewer_than_page_size_tokens_stay_in_staging_uncommitted(self):
         ak = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
         ak.append(_random_tokens(10))
         assert ak.seq_len == 10
         assert ak.block_table == []
         assert len(ak._staging) == 10
 
-    def test_commit_happens_at_exactly_page_size(an):
+    def test_commit_happens_at_exactly_page_size(self):
         am = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
         am.append(_random_tokens(20))
         assert am.seq_len == 20
@@ -96,7 +96,7 @@ class TestLayerKVCache:
         assert len(am._staging) == 4
         assert am.page_scales[am.block_table[0]] is not None
 
-    def test_read_fp32_round_trips_committed_pages_within_tolerance(aw):
+    def test_read_fp32_round_trips_committed_pages_within_tolerance(self):
         ao = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
         ax = _random_tokens(32, seed=5)
         ao.append(ax)
@@ -109,7 +109,7 @@ class TestLayerKVCache:
             aq = (ax[ar] - au[ar]).abs().max().item()
             assert aq <= av / 2 + 1e-3
 
-    def test_read_fp32_staging_tail_is_exact_not_quantized(ba):
+    def test_read_fp32_staging_tail_is_exact_not_quantized(self):
         ay = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
         bb = _random_tokens(20, seed=6)
         ay.append(bb)
@@ -119,7 +119,7 @@ class TestLayerKVCache:
 
         torch.testing.assert_close(az[16:], bb[16:], atol=0.0, rtol=0.0)
 
-    def test_different_pages_get_different_scales(bg):
+    def test_different_pages_get_different_scales(self):
 
 
         bc = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
@@ -133,7 +133,7 @@ class TestLayerKVCache:
         bf = bc.page_scales[bc.block_table[1]]
         assert bf > be * 10
 
-    def test_incremental_single_token_appends_match_one_shot_first_page(bk):
+    def test_incremental_single_token_appends_match_one_shot_first_page(self):
 
 
         bl = _random_tokens(20, seed=9)
@@ -151,7 +151,7 @@ class TestLayerKVCache:
         s2 = bi.page_scales[bi.block_table[0]]
         assert s1 == pytest.approx(s2, rel=1e-5)
 
-    def test_page_exhaustion_raises_on_second_commit(bn):
+    def test_page_exhaustion_raises_on_second_commit(self):
 
 
         bm = LayerKVCache(num_heads=4, head_dim=8, page_size=16, max_pages=1, device="cuda")
@@ -162,7 +162,7 @@ class TestLayerKVCache:
 class TestPagedKVCache:
 
 
-    def test_layers_are_independent(bp):
+    def test_layers_are_independent(self):
         bo = PagedKVCache(num_layers=3, num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
         k0, v0 = _random_tokens(16, scale=1.0, seed=10), _random_tokens(16, scale=1.0, seed=11)
         k1, v1 = _random_tokens(16, scale=1.0, seed=12), _random_tokens(16, scale=1.0, seed=13)
@@ -179,7 +179,7 @@ class TestPagedKVCache:
         s1 = bo.k_layers[1].page_scales[bo.k_layers[1].block_table[0]]
         assert s0 != s1
 
-    def test_memory_bytes_matches_shape_arithmetic(bs):
+    def test_memory_bytes_matches_shape_arithmetic(self):
         bq = PagedKVCache(num_layers=2, num_heads=4, head_dim=8, page_size=16, max_pages=4, device="cuda")
 
         br = 2 * 2 * 4 * 16 * 4 * 8

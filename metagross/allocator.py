@@ -1,33 +1,33 @@
 class BlockAllocator:
 
 
-    def __init__(b, a: int):
-        if a <= 0:
+    def __init__(self, num_pages):
+        if num_pages <= 0:
             raise ValueError("num_pages must be positive")
-        b.num_pages = a
-        b._free = list(range(a))
+        self.num_pages = num_pages
+        self._free = list(range(num_pages))
 
-    def allocate(c) -> int:
-        if not c._free:
+    def allocate(self) -> int:
+        if not self._free:
             raise RuntimeError(
-                f"BlockAllocator out of pages (all {c.num_pages} in use). "
+                f"BlockAllocator out of pages (all {self.num_pages} in use). "
                 "Increase max_pages, or (future work) add eviction/preemption."
             )
-        return c._free.pop()
+        return self._free.pop()
 
-    def free(e, d: int) -> None:
-        if not (0 <= d < e.num_pages):
-            raise ValueError(f"page_idx {d} out of range [0, {e.num_pages})")
+    def free(self, page_idx) -> None:
+        if not (0 <= page_idx < self.num_pages):
+            raise ValueError(f"page_idx {page_idx} out of range [0, {self.num_pages})")
 
 
-        if d in e._free:
-            raise RuntimeError(f"page_idx {d} is already free (double free)")
-        e._free.append(d)
-
-    @property
-    def num_free(g) -> int:
-        return len(g._free)
+        if page_idx in self._free:
+            raise RuntimeError(f"page_idx {page_idx} is already free (double free)")
+        self._free.append(page_idx)
 
     @property
-    def num_used(h) -> int:
-        return h.num_pages - len(h._free)
+    def num_free(self) -> int:
+        return len(self._free)
+
+    @property
+    def num_used(self) -> int:
+        return self.num_pages - len(self._free)

@@ -13,70 +13,70 @@ def _get_C():
 
 
 def _merge_unnormalized(
-    d: torch.Tensor, i: torch.Tensor, wv1: torch.Tensor,
-    e: torch.Tensor, j: torch.Tensor, wv2: torch.Tensor,
+    max1, sum1, wv1: torch.Tensor,
+    max2, sum2, wv2: torch.Tensor,
 ):
 
 
-    m = torch.maximum(d, e)
-    b = torch.exp(d - m)
-    c = torch.exp(e - m)
-    g = i * b + j * c
+    m = torch.maximum(max1, max2)
+    b = torch.exp(max1 - m)
+    c = torch.exp(max2 - m)
+    g = sum1 * b + sum2 * c
     h = wv1 * b.unsqueeze(-1) + wv2 * c.unsqueeze(-1)
     return h, g
 
 
-def _staging_contribution(p: torch.Tensor, r: torch.Tensor, t: torch.Tensor, n: float):
+def _staging_contribution(query, staging_k, staging_v, inv_sqrt_head_dim):
 
 
-    o, l = p.shape
-    k = p.device
+    o, l = query.shape
+    k = query.device
 
-    if r.shape[0] == 0:
+    if staging_k.shape[0] == 0:
 
 
         return (
-            torch.full((o,), float("-inf"), k=k),
-            torch.zeros(o, k=k),
-            torch.zeros(o, l, k=k),
+            torch.full((o,), float("-inf"), device=k),
+            torch.zeros(o, device=k),
+            torch.zeros(o, l, device=k),
         )
 
 
-    q = torch.einsum("thd,hd->ht", r, p) * n
+    q = torch.einsum("thd,hd->ht", staging_k, query) * inv_sqrt_head_dim
     m = q.max(dim=-1).values
     u = torch.exp(q - m.unsqueeze(-1))
     s = u.sum(dim=-1)
-    wv = torch.einsum("ht,thd->hd", u, t)
+    wv = torch.einsum("ht,thd->hd", u, staging_v)
     return m, s, wv
 
 
-def _repeat_kv_heads(x: torch.Tensor, w: int) -> torch.Tensor:
+def _repeat_kv_heads(x: torch.Tensor, n_rep) -> torch.Tensor:
 
 
-    if w == 1:
+    if n_rep == 1:
         return x
     seq, y, v = x.shape
-    return x[:, :, None, :].expand(seq, y, w, v).reshape(seq, y * w, v)
+    return x[:, :, None, :].expand(seq, y, n_rep, v).reshape(seq, y * n_rep, v)
 
 
-def paged_attention(aa: PagedKVCache, ai: int, ao: torch.Tensor, ap: float | None = None) -> torch.Tensor:
+def paged_attention(cache, layer_idx, query, scale = None) -> torch.Tensor:
 
 
-    if ao.dim() != 2:
-        raise ValueError(f"query must be 2-D [num_q_heads, head_dim], got {ao.dim()}-D")
-    an, af = ao.shape
+    if query.dim() != 2:
+        raise ValueError(f"query must be 2-D [num_q_heads, head_dim], got {query.dim()}-D")
+    an, af = query.shape
 
 
-    if ap is not None:
-        if isinstance(ap, torch.Tensor):
-            ap = ap.item()
-        if math.isnan(ap) or math.isinf(ap) or ap <= 0:
-            raise ValueError(f"scale must be a positive finite number, got {ap}")
-    ag = ap if ap is not None else 1.0 / (af ** 0.5)
+    if scale is not None:
+        if isinstance(scale, torch.Tensor):
+            scale = scale.item()
+        if math.isnan(scale) or math.isinf(scale) or scale <= 0:
+            raise ValueError(f"scale must be a positive finite number, got {scale}")
+    ag = scale if scale is not None else 1.0 / (af ** 0.5)
 
-    ah = aa.k_layers[ai]
-    az = aa.v_layers[ai]
-    ae = ao.device
+    ah = cache.k_layers[layer_idx]
+    az = cache.v_layers[layer_idx]
+    ae = query.device
 
 
     am = ah.num_heads
@@ -101,32 +101,32 @@ def paged_attention(aa: PagedKVCache, ai: int, ao: torch.Tensor, ap: float | Non
         )
 
     if ah.block_table:
-        z = torch.tensor(ah.block_table, dtype=torch.int32, ae=ae)
+        z = torch.tensor(ah.block_table, dtype=torch.int32, device=ae)
 
 
         aq = torch.tensor(
-            [s if s is not None else 0.0 for s in ah.page_scales], dtype=torch.float32, ae=ae
+            [s if s is not None else 0.0 for s in ah.page_scales], dtype=torch.float32, device=ae
         )
         ar = torch.tensor(
-            [s if s is not None else 0.0 for s in az.page_scales], dtype=torch.float32, ae=ae
+            [s if s is not None else 0.0 for s in az.page_scales], dtype=torch.float32, device=ae
         )
 
 
         ad, ac, ab = _get_C().paged_attention_committed(
-            ao, ah.storage, az.storage, aq, ar, z, ag
+            query, ah.storage, az.storage, aq, ar, z, ag
         )
     else:
-        ab = torch.full((an,), float("-inf"), ae=ae)
-        ac = torch.zeros(an, ae=ae)
-        ad = torch.zeros(an, af, ae=ae)
+        ab = torch.full((an,), float("-inf"), device=ae)
+        ac = torch.zeros(an, device=ae)
+        ad = torch.zeros(an, af, device=ae)
 
-    au = torch.stack(ah._staging) if ah._staging else torch.empty(0, am, af, ae=ae)
-    ax = torch.stack(az._staging) if az._staging else torch.empty(0, am, af, ae=ae)
+    au = torch.stack(ah._staging) if ah._staging else torch.empty(0, am, af, device=ae)
+    ax = torch.stack(az._staging) if az._staging else torch.empty(0, am, af, device=ae)
 
 
     au = _repeat_kv_heads(au, al)
     ax = _repeat_kv_heads(ax, al)
-    av, aw, ay = _staging_contribution(ao, au, ax, ag)
+    av, aw, ay = _staging_contribution(query, au, ax, ag)
 
     ak, aj = _merge_unnormalized(
         ab, ac, ad, av, aw, ay

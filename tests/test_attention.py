@@ -11,27 +11,27 @@ from metagross.cache import PagedKVCache
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-capable GPU")
 
 
-def _reference_full_attention(c, k, v, b):
+def _reference_full_attention(query, k, v, inv_sqrt_head_dim):
 
 
-    d = torch.einsum("thd,hd->ht", k, c) * b
+    d = torch.einsum("thd,hd->ht", k, query) * inv_sqrt_head_dim
     d = d - d.max(dim=-1, keepdim=True).values
     e = torch.softmax(d, dim=-1)
     return torch.einsum("ht,thd->hd", e, v)
 
 
-def _make_cache_with_tokens(o, n, h, p, l, i, q, g="cuda"):
-    f = PagedKVCache(o=o, n=n, h=h,
-                          p=p, l=l, g=g)
-    for j in range(o):
-        f.append(j, i, q)
+def _make_cache_with_tokens(num_layers, num_heads, head_dim, page_size, max_pages, k_tokens, v_tokens, device="cuda"):
+    f = PagedKVCache(num_layers=num_layers, num_heads=num_heads, head_dim=head_dim,
+                          page_size=page_size, max_pages=max_pages, device=device)
+    for j in range(num_layers):
+        f.append(j, k_tokens, v_tokens)
     return f
 
 
 class TestPagedAttentionKernelDirectly:
 
 
-    def test_matches_reference_when_everything_is_committed(al):
+    def test_matches_reference_when_everything_is_committed(self):
         torch.manual_seed(0)
         ad, u, ae = 4, 64, 16
         ab = 3
@@ -74,7 +74,7 @@ class TestPagedAttentionKernelDirectly:
 class TestStagingContribution:
 
 
-    def test_matches_reference(aw):
+    def test_matches_reference(self):
         torch.manual_seed(1)
         at, ap, ar = 4, 64, 7
         au = torch.randn(at, ap, device="cuda")
@@ -87,7 +87,7 @@ class TestStagingContribution:
         av = _reference_full_attention(au, k, v, aq)
         torch.testing.assert_close(got, av, atol=1e-4, rtol=1e-4)
 
-    def test_empty_staging_returns_identity(ba):
+    def test_empty_staging_returns_identity(self):
         az = torch.randn(4, 64, device="cuda")
         ax = torch.empty(0, 4, 64, device="cuda")
         ay = torch.empty(0, 4, 64, device="cuda")
@@ -100,7 +100,7 @@ class TestStagingContribution:
 class TestMergeUnnormalized:
 
 
-    def test_merging_with_identity_is_a_noop(bj):
+    def test_merging_with_identity_is_a_noop(self):
         torch.manual_seed(2)
         bi, bb = 4, 64
         bf = torch.randn(bi, device="cuda")
@@ -115,7 +115,7 @@ class TestMergeUnnormalized:
         torch.testing.assert_close(bg, bk)
         torch.testing.assert_close(bh, wv2)
 
-    def test_merge_matches_reference_full_attention(bs):
+    def test_merge_matches_reference_full_attention(self):
         torch.manual_seed(3)
         bp, bl = 4, 64
         n1, n2 = 10, 6
@@ -138,7 +138,7 @@ class TestMergeUnnormalized:
 class TestPagedAttentionEndToEnd:
 
 
-    def test_matches_reference_with_mixed_committed_and_staged_tokens(ch):
+    def test_matches_reference_with_mixed_committed_and_staged_tokens(self):
         torch.manual_seed(4)
         cb, by, cc = 4, 64, 16
         bz = 16
@@ -147,14 +147,14 @@ class TestPagedAttentionEndToEnd:
         bt = torch.randn(bz + ca, cb, by, device="cuda")
         bu = torch.randn(bz + ca, cb, by, device="cuda")
 
-        bv = PagedKVCache(num_layers=1, cb=cb, by=by,
-                              cc=cc, max_pages=4, device="cuda")
+        bv = PagedKVCache(num_layers=1, num_heads=cb, head_dim=by,
+                              page_size=cc, max_pages=4, device="cuda")
         bv.append(0, bt, bu)
         assert len(bv.k_layers[0].block_table) == 1
         assert len(bv.k_layers[0]._staging) == ca
 
         cd = torch.randn(cb, by, device="cuda")
-        got = paged_attention(bv, layer_idx=0, cd=cd)
+        got = paged_attention(bv, layer_idx=0, query=cd)
 
 
         ce = bv.k_layers[0].read_fp32()[:bz]
@@ -167,7 +167,7 @@ class TestPagedAttentionEndToEnd:
 
         torch.testing.assert_close(got, cg, atol=1e-3, rtol=1e-3)
 
-    def test_matches_reference_with_nothing_committed_yet(cs):
+    def test_matches_reference_with_nothing_committed_yet(self):
 
 
         torch.manual_seed(5)
@@ -176,13 +176,13 @@ class TestPagedAttentionEndToEnd:
 
         cm = torch.randn(cn, co, cl, device="cuda")
         ct = torch.randn(cn, co, cl, device="cuda")
-        ck = PagedKVCache(num_layers=1, co=co, cl=cl,
-                              cp=cp, max_pages=4, device="cuda")
+        ck = PagedKVCache(num_layers=1, num_heads=co, head_dim=cl,
+                              page_size=cp, max_pages=4, device="cuda")
         ck.append(0, cm, ct)
         assert ck.k_layers[0].block_table == []
 
         cq = torch.randn(co, cl, device="cuda")
-        got = paged_attention(ck, layer_idx=0, cq=cq)
+        got = paged_attention(ck, layer_idx=0, query=cq)
         cr = _reference_full_attention(cq, cm, ct, 1.0 / (cl ** 0.5))
         torch.testing.assert_close(got, cr, atol=1e-4, rtol=1e-4)
 
@@ -190,7 +190,7 @@ class TestPagedAttentionEndToEnd:
 class TestGroupedQueryAttention:
 
 
-    def test_repeat_kv_heads_matches_hf_reference(cz):
+    def test_repeat_kv_heads_matches_hf_reference(self):
 
         torch.manual_seed(6)
         cx, cw, seq, cu = 4, 8, 5, 3
@@ -202,7 +202,7 @@ class TestGroupedQueryAttention:
                 cy = cv * cw + rep
                 torch.testing.assert_close(out[:, cy, :], x[:, cv, :])
 
-    def test_kernel_matches_reference_at_tinyllama_shape(dt):
+    def test_kernel_matches_reference_at_tinyllama_shape(self):
 
 
         torch.manual_seed(7)
@@ -211,8 +211,8 @@ class TestGroupedQueryAttention:
         dh = 2
         dj = dh * dm
 
-        db = PagedKVCache(num_layers=1, num_heads=dk, dc=dc,
-                              dm=dm, max_pages=dh, device="cuda")
+        db = PagedKVCache(num_layers=1, num_heads=dk, head_dim=dc,
+                              page_size=dm, max_pages=dh, device="cuda")
         df = torch.randn(dj, dk, dc, device="cuda")
         dv = torch.randn(dj, dk, dc, device="cuda")
         db.append(0, df, dv)
@@ -236,7 +236,7 @@ class TestGroupedQueryAttention:
 
         torch.testing.assert_close(dg, dq, atol=1e-3, rtol=1e-3)
 
-    def test_end_to_end_paged_attention_at_tinyllama_shape(en):
+    def test_end_to_end_paged_attention_at_tinyllama_shape(self):
 
         torch.manual_seed(8)
         eh, eg, eb, ei = 32, 4, 64, 16
@@ -244,14 +244,14 @@ class TestGroupedQueryAttention:
 
         ec = torch.randn(ed + ef, eg, eb, device="cuda")
         eq = torch.randn(ed + ef, eg, eb, device="cuda")
-        dy = PagedKVCache(num_layers=1, num_heads=eg, eb=eb,
-                              ei=ei, max_pages=4, device="cuda")
+        dy = PagedKVCache(num_layers=1, num_heads=eg, head_dim=eb,
+                              page_size=ei, max_pages=4, device="cuda")
         dy.append(0, ec, eq)
         assert len(dy.k_layers[0].block_table) == 1
         assert len(dy.k_layers[0]._staging) == ef
 
         ej = torch.randn(eh, eb, device="cuda")
-        got = paged_attention(dy, layer_idx=0, ej=ej)
+        got = paged_attention(dy, layer_idx=0, query=ej)
         assert got.shape == (eh, eb)
 
         ee = eh // eg
